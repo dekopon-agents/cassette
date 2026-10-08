@@ -21,6 +21,9 @@ pub enum Error {
         addr: SocketAddr,
         source: io::Error,
     },
+    Echoed {
+        path: PathBuf,
+    },
     Runtime(io::Error),
     DuplicateUpstreams(Vec<String>),
 }
@@ -32,6 +35,11 @@ impl fmt::Display for Error {
             Error::Parse { path, source } => write!(formatter, "{}: {source}", path.display()),
             Error::Invalid { path, reason } => write!(formatter, "{}: {reason}", path.display()),
             Error::Listen { addr, source } => write!(formatter, "listen on {addr}: {source}"),
+            Error::Echoed { path } => write!(
+                formatter,
+                "{}: not saved, the upstream response echoes a redacted request header",
+                path.display()
+            ),
             Error::Runtime(source) => write!(formatter, "start the runtime: {source}"),
             Error::DuplicateUpstreams(names) => {
                 write!(

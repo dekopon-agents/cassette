@@ -26,9 +26,11 @@ readable). Redirects are not followed. The vendor's status, headers and body go 
 unchanged, and the exchange is saved as one file under `cassettes/<name>/`.
 
 Credential-bearing request headers are saved as `"[redacted]"`: `authorization`,
-`proxy-authorization`, `cookie`, `x-api-key`, `api-key`, and any header named with
-`--redact <header>` (repeatable). `set-cookie` is never saved. A record session continues the
-numbering of files already in the directory.
+`proxy-authorization`, `cookie`, `x-api-key`, `api-key`, `chatgpt-account-id`, and any header
+named with `--redact <header>` (repeatable). `set-cookie` is never saved. A response that echoes
+a redacted value (the whole header value, or the token after `Bearer `/`Basic `) anywhere in its
+headers or body is not saved: the caller gets `502` and stderr names the cassette file, never the
+value. A record session continues the numbering of files already in the directory.
 
 ## Replay
 

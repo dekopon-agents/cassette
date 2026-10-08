@@ -75,6 +75,7 @@ async fn respond(
     if let Some(value) = request.headers().get(header::AUTHORIZATION) {
         seen.lock().push(value.to_str().unwrap().to_owned());
     }
+    let echoed = request.headers().get(header::AUTHORIZATION).cloned();
     let accept = request
         .headers()
         .get(header::ACCEPT)
@@ -111,6 +112,14 @@ async fn respond(
             "application/json",
             Bytes::from_static(br#"{"number": 1}"#),
         ),
+        (Method::GET, "/echo") => {
+            let echoed = echoed.unwrap();
+            let mut response = Response::new(Full::new(Bytes::from(
+                json!({"you sent": echoed.to_str().unwrap()}).to_string(),
+            )));
+            response.headers_mut().insert("x-echo", echoed);
+            return response;
+        }
         (Method::GET, "/binary") => (
             StatusCode::OK,
             "application/octet-stream",
@@ -471,4 +480,27 @@ async fn accept_is_part_of_the_match_key() {
     assert_eq!(bare.status, StatusCode::NOT_IMPLEMENTED);
     let (status, _) = replay.exit().await;
     assert!(!status.success());
+}
+
+#[tokio::test]
+async fn a_response_echoing_a_redacted_credential_is_refused_and_not_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = upstream().await;
+    let recorder = Cassette::record(dir.path(), &upstream, &[]);
+    let bearer = format!("Bearer {SECRET}");
+
+    let reply = get(
+        &format!("{}/api/echo", recorder.base),
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
+    assert!(
+        !reply
+            .body
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+    assert!(!reply.headers.contains_key("x-echo"));
+    assert_eq!(names(dir.path()), Vec::<String>::new());
 }

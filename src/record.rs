@@ -17,12 +17,13 @@ use crate::cassette::{self, Body, Cassette, Stored};
 use crate::error::Error;
 use crate::server::{Reply, text};
 
-const CREDENTIAL_HEADERS: [&str; 5] = [
+const CREDENTIAL_HEADERS: [&str; 6] = [
     "authorization",
     "proxy-authorization",
     "cookie",
     "x-api-key",
     "api-key",
+    "chatgpt-account-id",
 ];
 
 #[derive(Clone, Debug)]
@@ -225,12 +226,34 @@ impl Recorder {
         let file = upstream
             .dir
             .join(cassette::file_name(sequence, parts.method.as_str(), &path));
-        if let Err(error) = save(&file, &cassette).await {
+        let secrets: Vec<&[u8]> = parts
+            .headers
+            .iter()
+            .filter(|(header_name, _)| self.redact.contains(header_name))
+            .flat_map(|(_, value)| secret_forms(value.as_bytes()))
+            .collect();
+        let raw_echo = echoes(
+            &secrets,
+            response_parts
+                .headers
+                .iter()
+                .flat_map(|(header_name, value)| {
+                    [header_name.as_str().as_bytes(), value.as_bytes()]
+                })
+                .chain([&response_body[..]]),
+        );
+        let saved = if raw_echo {
+            Err(Error::Echoed { path: file })
+        } else {
+            save(&file, &cassette, &secrets).await
+        };
+        if let Err(error) = saved {
             eprintln!("cassette: {error}");
-            return Ok(text(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("cassette: {error}\n"),
-            ));
+            let status = match error {
+                Error::Echoed { .. } => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return Ok(text(status, format!("cassette: {error}\n")));
         }
 
         let mut reply = Response::new(Full::new(response_body));
@@ -273,11 +296,39 @@ fn next_sequence(dir: &Path) -> Result<u32, Error> {
     Ok(last + 1)
 }
 
-async fn save(file: &Path, cassette: &Cassette) -> Result<(), Error> {
+fn secret_forms(value: &[u8]) -> Vec<&[u8]> {
+    let mut forms = vec![value];
+    for scheme in [&b"bearer "[..], b"basic "] {
+        if let Some((head, token)) = value.split_at_checked(scheme.len())
+            && head.eq_ignore_ascii_case(scheme)
+        {
+            forms.push(token.trim_ascii());
+        }
+    }
+    forms.retain(|form| !form.is_empty());
+    forms
+}
+
+fn echoes<'a>(secrets: &[&[u8]], haystacks: impl IntoIterator<Item = &'a [u8]>) -> bool {
+    haystacks.into_iter().any(|haystack| {
+        secrets.iter().any(|secret| {
+            haystack
+                .windows(secret.len())
+                .any(|window| window == *secret)
+        })
+    })
+}
+
+async fn save(file: &Path, cassette: &Cassette, secrets: &[&[u8]]) -> Result<(), Error> {
     let mut json = serde_json::to_vec_pretty(cassette).map_err(|source| Error::Parse {
         path: file.to_owned(),
         source,
     })?;
+    if echoes(secrets, [&json[..]]) {
+        return Err(Error::Echoed {
+            path: file.to_owned(),
+        });
+    }
     json.push(b'\n');
     let mut temporary = file.as_os_str().to_owned();
     temporary.push(".tmp");
