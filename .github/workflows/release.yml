@@ -1,0 +1,139 @@
+name: Release
+
+# A `v*.*.*` tag builds and attests the archives, publishes the GitHub release, then packages that
+# release as the container image and the Homebrew formula. The two packaging workflows are called
+# with `needs:` because a release created with GITHUB_TOKEN never fires `release: published`.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  validate:
+    name: validate release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag matches the crate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "cassette") | .version')
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "::error::tag $RELEASE_TAG does not match cassette $version"
+            exit 1
+          fi
+
+  artifacts:
+    name: build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install target toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: cassette
+          key: ${{ hashFiles('rust-toolchain.toml') }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Create archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="cassette-${RELEASE_TAG#v}-${{ matrix.target }}"
+          mkdir -p "staging/$archive"
+          cp "target/${{ matrix.target }}/release/cassette" "staging/$archive/"
+          cp README.md LICENSE-APACHE LICENSE-MIT "staging/$archive/"
+          tar -C staging -czf "$archive.tar.gz" "$archive"
+          shasum -a 256 "$archive.tar.gz" > "$archive.tar.gz.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cassette-${{ matrix.target }}
+          path: |
+            cassette-*.tar.gz
+            cassette-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  github-release:
+    name: publish GitHub release
+    needs: artifacts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    outputs:
+      tag: ${{ steps.published.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: cassette-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
+      - id: published
+        run: echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  container-image:
+    name: publish container image
+    needs: github-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/container-image.yml
+    with:
+      tag: ${{ needs.github-release.outputs.tag }}
+
+  homebrew-tap:
+    name: update Homebrew tap
+    needs: github-release
+    permissions:
+      contents: read
+    secrets: inherit
+    uses: ./.github/workflows/homebrew-tap.yml
+    with:
+      tag: ${{ needs.github-release.outputs.tag }}
