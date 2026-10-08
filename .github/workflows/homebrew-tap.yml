@@ -1,0 +1,92 @@
+name: Homebrew tap
+
+# Points dekopon-agents/homebrew-tap's Formula/cassette.rb at a published release, with a
+# token from the org-wide dekopon-release App (org secrets DEKOPON_RELEASE_APP_ID/_KEY). Without
+# them it skips with a warning instead of failing a release that already published.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  formula:
+    name: update the cassette formula
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check tap credentials
+        id: credential
+        env:
+          TAP_APP_ID: ${{ secrets.DEKOPON_RELEASE_APP_ID }}
+          TAP_APP_KEY_SET: ${{ secrets.DEKOPON_RELEASE_APP_KEY != '' }}
+        run: |
+          if [ -z "$TAP_APP_ID" ] || [ "$TAP_APP_KEY_SET" != "true" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DEKOPON_RELEASE_APP_ID or DEKOPON_RELEASE_APP_KEY is unset; skipping the Homebrew tap update."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: tap-token
+        if: steps.credential.outputs.present == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEKOPON_RELEASE_APP_ID }}
+          private-key: ${{ secrets.DEKOPON_RELEASE_APP_KEY }}
+          owner: dekopon-agents
+          repositories: homebrew-tap
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.credential.outputs.present == 'true'
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+          path: source
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.credential.outputs.present == 'true'
+        with:
+          repository: dekopon-agents/homebrew-tap
+          token: ${{ steps.tap-token.outputs.token }}
+          path: tap
+
+      - name: Render and push the formula
+        if: steps.credential.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.tar.gz.sha256' --dir checksums
+          python3 source/.github/scripts/render-homebrew-formula.py \
+            --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" \
+            --checksums checksums --output tap/Formula/cassette.rb
+          cd tap
+          if git diff --quiet -- Formula/cassette.rb && git ls-files --error-unmatch Formula/cassette.rb > /dev/null 2>&1; then
+            echo "::notice::Formula already matches $RELEASE_TAG."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/cassette.rb
+          git commit -m "chore: update cassette to ${RELEASE_TAG#v}"
+          git push origin HEAD:main
