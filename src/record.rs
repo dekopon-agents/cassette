@@ -10,10 +10,10 @@ use hyper::header::{self, HeaderName};
 use hyper::{HeaderMap, Request, Response, StatusCode, Uri, Version};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 
 use crate::cassette::{self, Body, Cassette, Stored};
+use crate::connect::{self, ProxyConnector};
 use crate::error::Error;
 use crate::server::{Reply, text};
 
@@ -65,7 +65,7 @@ struct Upstream {
 pub struct Recorder {
     upstreams: HashMap<String, Upstream>,
     redact: Vec<HeaderName>,
-    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    client: Client<HttpsConnector<ProxyConnector>, Full<Bytes>>,
 }
 
 impl Recorder {
@@ -87,6 +87,12 @@ impl Recorder {
             duplicates.sort();
             return Err(Error::DuplicateUpstreams(duplicates));
         }
+
+        let origins: Vec<&str> = upstreams
+            .iter()
+            .map(|upstream| upstream.origin.as_str())
+            .collect();
+        let connector = connect::from_env(&origins)?;
 
         let mut by_name = HashMap::new();
         for UpstreamArg { name, origin } in upstreams {
@@ -112,11 +118,6 @@ impl Recorder {
             .collect();
         redact_all.extend(redact);
 
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
         Ok(Recorder {
             upstreams: by_name,
             redact: redact_all,
@@ -174,6 +175,7 @@ impl Recorder {
         let response = match self.client.request(outbound).await {
             Ok(response) => response,
             Err(error) => {
+                let error = causes(&error);
                 eprintln!("cassette upstream {target}: {error}");
                 return Ok(text(
                     StatusCode::BAD_GATEWAY,
@@ -261,6 +263,19 @@ impl Recorder {
         copy_response_headers(&response_parts.headers, reply.headers_mut());
         Ok(reply)
     }
+}
+
+/// The error and its sources, so a 502 says "tunnel error: ..." or "invalid peer certificate"
+/// rather than only "client error (Connect)".
+fn causes(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 fn forwarded(name: &HeaderName, headers: &HeaderMap) -> bool {

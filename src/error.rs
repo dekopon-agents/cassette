@@ -26,6 +26,7 @@ pub enum Error {
     },
     Runtime(io::Error),
     DuplicateUpstreams(Vec<String>),
+    Proxy(String),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +49,7 @@ impl fmt::Display for Error {
                     names.join(", ")
                 )
             }
+            Error::Proxy(reason) => write!(formatter, "{reason}"),
         }
     }
 }
