@@ -1,8 +1,3 @@
-//! The outbound connector `record` uses: direct TCP, or a CONNECT tunnel through the proxy that
-//! `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` name for the destination (minus `NO_PROXY` hosts), with
-//! TLS to the upstream inside it. Roots are the built-in webpki ones plus any in `SSL_CERT_FILE`,
-//! so a proxy that terminates TLS with its own CA is trusted when that CA is handed over.
-
 use std::error::Error as StdError;
 use std::future::Future;
 use std::path::PathBuf;
@@ -26,9 +21,34 @@ use crate::error::Error;
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
-/// Builds the HTTPS-or-HTTP connector from the process environment, checking that every origin
-/// that will be proxied names an `http://` proxy.
+const PROXY_VARIABLES: [[&str; 2]; 3] = [
+    ["ALL_PROXY", "all_proxy"],
+    ["HTTP_PROXY", "http_proxy"],
+    ["HTTPS_PROXY", "https_proxy"],
+];
+
 pub fn from_env(origins: &[&str]) -> Result<HttpsConnector<ProxyConnector>, Error> {
+    // Matcher drops a value it cannot parse and connects directly; refuse it instead. The first
+    // variable set in each pair is the one Matcher reads.
+    let probe = Uri::from_static("http://example.invalid/");
+    for pair in PROXY_VARIABLES {
+        let Some((variable, value)) = pair
+            .into_iter()
+            .find_map(|variable| Some((variable, std::env::var(variable).ok()?)))
+        else {
+            continue;
+        };
+        if !value.is_empty()
+            && Matcher::builder()
+                .all(value)
+                .build()
+                .intercept(&probe)
+                .is_none()
+        {
+            return Err(Error::ProxyMalformed { variable });
+        }
+    }
+
     let proxies = Matcher::from_env();
     for origin in origins {
         let Ok(uri) = origin.parse::<Uri>() else {
@@ -37,9 +57,9 @@ pub fn from_env(origins: &[&str]) -> Result<HttpsConnector<ProxyConnector>, Erro
         if let Some(proxy) = proxies.intercept(&uri)
             && proxy.uri().scheme() != Some(&Scheme::HTTP)
         {
-            return Err(Error::Proxy(format!(
-                "the proxy for {origin} must be an http:// URL (CONNECT is sent in clear)"
-            )));
+            return Err(Error::ProxyNotHttp {
+                origin: (*origin).to_owned(),
+            });
         }
     }
 
@@ -52,7 +72,7 @@ pub fn from_env(origins: &[&str]) -> Result<HttpsConnector<ProxyConnector>, Erro
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|error| Error::Proxy(format!("TLS configuration: {error}")))?
+        .map_err(Error::Tls)?
         .with_root_certificates(roots()?)
         .with_no_client_auth();
     Ok(hyper_rustls::HttpsConnectorBuilder::new()

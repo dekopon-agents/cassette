@@ -1,5 +1,3 @@
-//! `record` through a CONNECT proxy to a TLS upstream whose CA is given only by `SSL_CERT_FILE`.
-
 use std::convert::Infallible;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -48,7 +46,6 @@ struct Pki {
     tls: Arc<rustls::ServerConfig>,
 }
 
-/// A throwaway CA and a leaf for 127.0.0.1 it signs, generated per test.
 fn pki() -> Pki {
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -89,7 +86,6 @@ impl Drop for Server {
     }
 }
 
-/// An HTTPS upstream that records each request's `authorization` and answers JSON.
 async fn tls_upstream(tls: Arc<rustls::ServerConfig>) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -133,7 +129,6 @@ async fn tls_upstream(tls: Arc<rustls::ServerConfig>) -> Server {
     Server { port, seen, task }
 }
 
-/// A CONNECT proxy that records each request head and splices bytes to the named target.
 async fn connect_proxy() -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -166,7 +161,13 @@ async fn connect_proxy() -> Server {
                         .unwrap();
                     return;
                 };
-                let mut upstream = TcpStream::connect(target).await.unwrap();
+                let Ok(mut upstream) = TcpStream::connect(target).await else {
+                    client
+                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        .await
+                        .unwrap();
+                    return;
+                };
                 client
                     .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     .await
@@ -188,13 +189,11 @@ struct Recorder {
 }
 
 impl Recorder {
-    /// Starts `cassette record` with only the proxy and CA variables given here.
-    fn start(dir: &Path, upstream_port: u16, env: &[(&str, &str)]) -> Recorder {
+    fn start(dir: &Path, upstream: &str, env: &[(&str, &str)]) -> Recorder {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cassette"));
         command
             .args(["record", "--dir", dir.to_str().unwrap()])
-            .arg("--upstream")
-            .arg(format!("gh=https://127.0.0.1:{upstream_port}"))
+            .args(["--upstream", upstream])
             .args(["--listen", "127.0.0.1:0"])
             .env_remove("SSL_CERT_FILE")
             .stdout(Stdio::piped())
@@ -287,6 +286,10 @@ impl Setup {
         self.work.path().join("cassettes")
     }
 
+    fn origin(&self) -> String {
+        format!("gh=https://127.0.0.1:{}", self.upstream.port)
+    }
+
     fn proxy_url(&self) -> String {
         format!(
             "http://{PROXY_USER}:{PROXY_SECRET}@127.0.0.1:{}",
@@ -301,7 +304,7 @@ async fn recording_tunnels_through_https_proxy_and_trusts_ssl_cert_file() {
     let proxy = setup.proxy_url();
     let recorder = Recorder::start(
         &setup.cassettes(),
-        setup.upstream.port,
+        &setup.origin(),
         &[
             ("HTTPS_PROXY", &proxy),
             ("SSL_CERT_FILE", setup.ca_file.to_str().unwrap()),
@@ -367,7 +370,7 @@ async fn without_ssl_cert_file_the_test_ca_is_not_trusted() {
     let proxy = setup.proxy_url();
     let recorder = Recorder::start(
         &setup.cassettes(),
-        setup.upstream.port,
+        &setup.origin(),
         &[("HTTPS_PROXY", &proxy)],
     );
 
@@ -393,7 +396,7 @@ async fn no_proxy_hosts_are_reached_directly() {
     let proxy = setup.proxy_url();
     let recorder = Recorder::start(
         &setup.cassettes(),
-        setup.upstream.port,
+        &setup.origin(),
         &[
             ("HTTPS_PROXY", &proxy),
             ("NO_PROXY", "example.com,127.0.0.1"),
@@ -426,21 +429,22 @@ fn startup_failure(env: &[(&str, &str)]) -> (ExitStatus, String) {
     }
     command.envs(env.iter().copied());
     let mut child = command.spawn().unwrap();
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
     for _ in 0..100 {
         if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
             return (status, stderr);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     child.kill().unwrap();
-    panic!("cassette kept running: {stderr}");
+    child.wait().unwrap();
+    panic!("cassette kept running");
 }
 
 #[test]
@@ -464,4 +468,38 @@ fn an_https_proxy_url_is_a_startup_error_that_hides_its_credentials() {
     assert_eq!(status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("http://"), "{stderr}");
     assert!(!stderr.contains(PROXY_SECRET), "{stderr}");
+}
+
+#[test]
+fn a_malformed_proxy_value_is_a_startup_error_that_hides_it() {
+    for value in [
+        format!("ftp://u:{PROXY_SECRET}@proxy:21"),
+        format!("http://u:{PROXY_SECRET}@pro xy:3128"),
+    ] {
+        let (status, stderr) = startup_failure(&[("https_proxy", &value)]);
+        assert_eq!(status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("https_proxy"), "{stderr}");
+        assert!(!stderr.contains(PROXY_SECRET), "{stderr}");
+    }
+}
+
+#[tokio::test]
+async fn a_tunnel_to_an_http_origin_names_port_80() {
+    let work = tempfile::tempdir().unwrap();
+    let proxy = connect_proxy().await;
+    let proxy_url = format!("http://127.0.0.1:{}", proxy.port);
+    let recorder = Recorder::start(
+        work.path(),
+        "plain=http://example.invalid",
+        &[("HTTP_PROXY", &proxy_url)],
+    );
+
+    let (status, _) = get(&format!("{}/plain/x", recorder.base), "Bearer none").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let heads = proxy.seen.lock().clone();
+    assert_eq!(heads.len(), 1, "{heads:?}");
+    assert!(
+        heads[0].starts_with("CONNECT example.invalid:80 HTTP/1.1\r\n"),
+        "{heads:?}"
+    );
 }

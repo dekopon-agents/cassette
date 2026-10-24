@@ -26,7 +26,13 @@ pub enum Error {
     },
     Runtime(io::Error),
     DuplicateUpstreams(Vec<String>),
-    Proxy(String),
+    ProxyNotHttp {
+        origin: String,
+    },
+    ProxyMalformed {
+        variable: &'static str,
+    },
+    Tls(rustls::Error),
 }
 
 impl fmt::Display for Error {
@@ -49,7 +55,14 @@ impl fmt::Display for Error {
                     names.join(", ")
                 )
             }
-            Error::Proxy(reason) => write!(formatter, "{reason}"),
+            Error::ProxyNotHttp { origin } => write!(
+                formatter,
+                "the proxy for {origin} must be an http:// URL (CONNECT is sent in clear)"
+            ),
+            Error::ProxyMalformed { variable } => {
+                write!(formatter, "{variable} is not a proxy URL")
+            }
+            Error::Tls(source) => write!(formatter, "TLS configuration: {source}"),
         }
     }
 }

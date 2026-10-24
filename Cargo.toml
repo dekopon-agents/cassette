@@ -11,7 +11,7 @@ authors = ["Dekopon contributors"]
 publish = false
 
 [dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 bytes = "1.10.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 http-body-util = "0.1.3"

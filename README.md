@@ -38,8 +38,8 @@ forms) and skip hosts listed in `NO_PROXY`, the way curl reads them. A proxied r
 URL must be `http://` and may carry `user:password@`, sent as `Proxy-Authorization` on the
 `CONNECT` only and never saved. Certificates are checked against built-in webpki roots plus any
 PEM roots in `SSL_CERT_FILE`, so a proxy that terminates TLS with its own CA works once that CA is
-in the file. An unreadable `SSL_CERT_FILE`, one with no certificate, or an `https://` proxy URL is
-a startup error. Replay never reads these variables.
+in the file. An unreadable `SSL_CERT_FILE`, one with no certificate, a proxy variable that is not a
+URL, or an `https://` proxy URL is a startup error. Replay never reads these variables.
 
 ## Replay
 
