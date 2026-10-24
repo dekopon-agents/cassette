@@ -32,6 +32,15 @@ a redacted value (the whole header value, or the token after `Bearer `/`Basic `)
 headers or body is not saved: the caller gets `502` and stderr names the cassette file, never the
 value. A record session continues the numbering of files already in the directory.
 
+Upstream connections honour `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` (or their lowercase
+forms) and skip hosts listed in `NO_PROXY`, the way curl reads them. A proxied request opens a
+`CONNECT` tunnel to the upstream (port 80 for `http://` origins) and runs TLS inside it; the proxy
+URL must be `http://` and may carry `user:password@`, sent as `Proxy-Authorization` on the
+`CONNECT` only and never saved. Certificates are checked against built-in webpki roots plus any
+PEM roots in `SSL_CERT_FILE`, so a proxy that terminates TLS with its own CA works once that CA is
+in the file. An unreadable `SSL_CERT_FILE`, one with no certificate, a proxy variable that is not a
+URL, or an `https://` proxy URL is a startup error. Replay never reads these variables.
+
 ## Replay
 
 ```sh

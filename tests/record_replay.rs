@@ -149,6 +149,11 @@ impl Cassette {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cassette"))
             .args(arguments)
             .args(["--listen", "127.0.0.1:0"])
+            // The local upstreams are plain HTTP on loopback: keep a host proxy out of the way.
+            .env_remove("HTTP_PROXY")
+            .env_remove("http_proxy")
+            .env_remove("ALL_PROXY")
+            .env_remove("all_proxy")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

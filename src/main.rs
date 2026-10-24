@@ -1,4 +1,5 @@
 mod cassette;
+mod connect;
 mod error;
 mod record;
 mod replay;
